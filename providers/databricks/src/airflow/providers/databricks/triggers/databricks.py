@@ -127,11 +127,11 @@ class DatabricksExecutionTrigger(BaseTrigger):
 
 class DatabricksWorkflowRepairCoordinatorTrigger(BaseTrigger):
     """
-    Coordinate parent-run polling and full-run repairs for a Databricks Workflow run.
+    Coordinate parent-run polling and repairs for a Databricks Workflow run.
 
     :param run_id: The Databricks run id to coordinate.
     :param databricks_conn_id: Airflow connection id for the Databricks hook.
-    :param max_full_run_repairs: Total repair attempts allowed for this run.
+    :param workflow_repair_attempts: Total repair attempts allowed for this run.
     :param repair_attempts: Repair attempts already performed.
     :param latest_repair_id: Repair id of the most recent repair attempt.
     :param polling_period_seconds: How often to poll the run state.
@@ -146,7 +146,7 @@ class DatabricksWorkflowRepairCoordinatorTrigger(BaseTrigger):
         self,
         run_id: int,
         databricks_conn_id: str,
-        max_full_run_repairs: int,
+        workflow_repair_attempts: int,
         repair_attempts: int = 0,
         latest_repair_id: int | None = None,
         polling_period_seconds: int = 30,
@@ -159,7 +159,7 @@ class DatabricksWorkflowRepairCoordinatorTrigger(BaseTrigger):
         super().__init__()
         self.run_id = run_id
         self.databricks_conn_id = databricks_conn_id
-        self.max_full_run_repairs = max_full_run_repairs
+        self.workflow_repair_attempts = workflow_repair_attempts
         self.repair_attempts = repair_attempts
         self.latest_repair_id = latest_repair_id
         self.polling_period_seconds = polling_period_seconds
@@ -182,7 +182,7 @@ class DatabricksWorkflowRepairCoordinatorTrigger(BaseTrigger):
             {
                 "run_id": self.run_id,
                 "databricks_conn_id": self.databricks_conn_id,
-                "max_full_run_repairs": self.max_full_run_repairs,
+                "workflow_repair_attempts": self.workflow_repair_attempts,
                 "repair_attempts": self.repair_attempts,
                 "latest_repair_id": self.latest_repair_id,
                 "polling_period_seconds": self.polling_period_seconds,
@@ -236,13 +236,13 @@ class DatabricksWorkflowRepairCoordinatorTrigger(BaseTrigger):
                     )
                     return
 
-                if self.repair_attempts >= self.max_full_run_repairs:
+                if self.repair_attempts >= self.workflow_repair_attempts:
                     self.log.info(
                         "Databricks run %s reached terminal failure state %s and repair budget "
-                        "is exhausted (max_full_run_repairs=%s).",
+                        "is exhausted (workflow_repair_attempts=%s).",
                         self.run_id,
                         run_state.result_state,
-                        self.max_full_run_repairs,
+                        self.workflow_repair_attempts,
                     )
                     yield TriggerEvent(
                         {
@@ -263,7 +263,7 @@ class DatabricksWorkflowRepairCoordinatorTrigger(BaseTrigger):
                     self.run_id,
                     run_state.result_state,
                     self.repair_attempts + 1,
-                    self.max_full_run_repairs,
+                    self.workflow_repair_attempts,
                     self.latest_repair_id,
                 )
 
