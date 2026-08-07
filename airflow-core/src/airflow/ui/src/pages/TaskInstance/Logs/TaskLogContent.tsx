@@ -17,18 +17,26 @@
  * under the License.
  */
 import { Box, Code, VStack } from "@chakra-ui/react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
+import type { Range as VirtualizerRange } from "@tanstack/react-virtual";
 import { useLayoutEffect, useRef, useCallback, useEffect } from "react";
-import { useHotkeys } from "react-hotkeys-hook";
 
 import { ErrorAlert } from "src/components/ErrorAlert";
 import { ProgressBar } from "src/components/ui";
+import { SHORTCUTS } from "src/context/keyboardShortcuts";
+import { useShortcut } from "src/hooks/useShortcut";
 import type { ParsedLogEntry } from "src/queries/useLogs";
 
 import { HighlightedText } from "./HighlightedText";
 import { ScrollToButton } from "./ScrollToButton";
+import {
+  extractSelectedLogText,
+  getEntryText,
+  getSelectionPinnedRows,
+  mergePinnedIndexes,
+} from "./logSelection";
 import { useLogGroups } from "./useLogGroups";
-import { getHighlightColor, scrollToBottom, scrollToTop } from "./utils";
+import { getHighlightColor, isSelectionWithin, scrollToBottom, scrollToTop } from "./utils";
 
 export type TaskLogContentProps = {
   readonly currentMatchLineIndex?: number;
@@ -42,8 +50,10 @@ export type TaskLogContentProps = {
   readonly wrap: boolean;
 };
 
-// How close to the bottom (in px) before we consider the user "at the bottom"
-const SCROLL_BOTTOM_THRESHOLD = 100;
+// How close to the very end (in px) the user must be for the log to keep
+// following new lines. Small so that scrolling up even a little to read
+// stops the follow; returning to the end resumes it.
+const SCROLL_BOTTOM_THRESHOLD = 40;
 
 export const TaskLogContent = ({
   currentMatchLineIndex,
@@ -61,21 +71,28 @@ export const TaskLogContent = ({
 
   const {
     expandedGroups,
-    originalToVisibleIndex,
+    lineNumberToVisibleIndex,
     toggleGroup,
     visibleCurrentMatchIndex,
     visibleItems,
     visibleSearchMatchIndices,
   } = useLogGroups({ currentMatchLineIndex, expanded, parsedLogs, searchMatchIndices });
 
+  const hashVisibleIndex = hash === "" ? undefined : lineNumberToVisibleIndex.get(Number(hash));
+
   const isAtBottomRef = useRef<boolean>(true);
   const prevVisibleCountRef = useRef<number>(0);
+  const pinnedRowsRef = useRef<Array<number>>([]);
+
+  const rangeExtractor = (range: VirtualizerRange) =>
+    mergePinnedIndexes(defaultRangeExtractor(range), pinnedRowsRef.current, range.count);
 
   const rowVirtualizer = useVirtualizer({
     count: visibleItems.length,
     estimateSize: () => 20,
     getScrollElement: () => parentRef.current,
     overscan: 10,
+    rangeExtractor,
   });
 
   const contentHeight = rowVirtualizer.getTotalSize();
@@ -99,29 +116,72 @@ export const TaskLogContent = ({
     return () => el?.removeEventListener("scroll", handleScroll);
   }, [handleScroll]);
 
+  useEffect(() => {
+    const container = parentRef.current;
+    const handleSelectionChange = () => {
+      if (!container) {
+        return;
+      }
+      pinnedRowsRef.current = getSelectionPinnedRows(document.getSelection(), container);
+    };
+
+    document.addEventListener("selectionchange", handleSelectionChange);
+
+    return () => document.removeEventListener("selectionchange", handleSelectionChange);
+  }, []);
+
+  useEffect(() => {
+    const handleCopy = (event: ClipboardEvent) => {
+      const container = parentRef.current;
+      const selection = document.getSelection();
+
+      if (!container || !selection || !event.clipboardData) {
+        return;
+      }
+      const text = extractSelectedLogText({
+        container,
+        getRowText: (index) => {
+          const entry = visibleItems[index]?.entry;
+
+          return entry ? getEntryText(entry) : "";
+        },
+        selection,
+      });
+
+      if (text === undefined) {
+        return;
+      }
+      event.preventDefault();
+      event.clipboardData.setData("text/plain", text);
+    };
+
+    document.addEventListener("copy", handleCopy);
+
+    return () => document.removeEventListener("copy", handleCopy);
+  }, [visibleItems]);
+
   useLayoutEffect(() => {
     if (visibleItems.length === 0) {
       return;
     }
     const isFirstLoad = prevVisibleCountRef.current === 0;
     const hasNewLines = visibleItems.length > prevVisibleCountRef.current;
+    // Pause following while the user is selecting text in the log — scrolling
+    // would move the text out from under the cursor and clear the selection.
+    const isSelecting = isSelectionWithin(document.getSelection(), parentRef.current);
 
-    if ((isFirstLoad || (hasNewLines && isAtBottomRef.current)) && !location.hash) {
+    if ((isFirstLoad || (hasNewLines && isAtBottomRef.current && !isSelecting)) && !location.hash) {
       rowVirtualizer.scrollToIndex(visibleItems.length - 1, { align: "end" });
     }
     prevVisibleCountRef.current = visibleItems.length;
   }, [visibleItems.length, rowVirtualizer]);
 
   useLayoutEffect(() => {
-    if (location.hash && !isLoading) {
-      const hashVisibleIndex = originalToVisibleIndex.get(Number(hash) - 1);
-
-      if (hashVisibleIndex !== undefined) {
-        rowVirtualizer.scrollToIndex(Math.min(hashVisibleIndex + 5, visibleItems.length - 1));
-      }
+    if (location.hash && !isLoading && hashVisibleIndex !== undefined) {
+      rowVirtualizer.scrollToIndex(Math.min(hashVisibleIndex + 5, visibleItems.length - 1));
     }
     // React Compiler auto-memoizes; safe to include in deps
-  }, [isLoading, rowVirtualizer, hash, visibleItems, originalToVisibleIndex]);
+  }, [isLoading, rowVirtualizer, visibleItems, hashVisibleIndex]);
 
   useLayoutEffect(() => {
     if (visibleCurrentMatchIndex !== undefined && !isLoading) {
@@ -148,8 +208,16 @@ export const TaskLogContent = ({
     }
   };
 
-  useHotkeys("mod+ArrowDown", () => handleScrollTo("bottom"), { enabled: !isLoading });
-  useHotkeys("mod+ArrowUp", () => handleScrollTo("top"), { enabled: !isLoading });
+  useShortcut({
+    ...SHORTCUTS.logs.scrollBottom,
+    callback: () => handleScrollTo("bottom"),
+    options: { enabled: !isLoading },
+  });
+  useShortcut({
+    ...SHORTCUTS.logs.scrollTop,
+    callback: () => handleScrollTo("top"),
+    options: { enabled: !isLoading },
+  });
 
   return (
     <Box display="flex" flexDirection="column" flexGrow={1} h="100%" minHeight={0} position="relative">
@@ -200,7 +268,7 @@ export const TaskLogContent = ({
                     _rtl={{ left: "auto", right: 0 }}
                     bgColor={getHighlightColor({
                       currentMatchLineIndex: visibleCurrentMatchIndex,
-                      hash,
+                      hashIndex: hashVisibleIndex,
                       index: virtualRow.index,
                       searchMatchIndices: visibleSearchMatchIndices,
                     })}
@@ -248,7 +316,7 @@ export const TaskLogContent = ({
                   _rtl={{ left: "auto", right: 0 }}
                   bgColor={getHighlightColor({
                     currentMatchLineIndex: visibleCurrentMatchIndex,
-                    hash,
+                    hashIndex: hashVisibleIndex,
                     index: virtualRow.index,
                     searchMatchIndices: visibleSearchMatchIndices,
                   })}
